@@ -88,15 +88,21 @@ class MemoryManager:
         
         if 'foreshadowing' in updates:
             for item in updates['foreshadowing']:
-                # Check if already exists to avoid duplicates (simple check)
-                exists = any(f['description'] == item for f in self.world_state['foreshadowing'] if isinstance(f, dict))
+                # Handle item being a dict (from MCTS state) or string (from simple updates)
+                description = item['description'] if isinstance(item, dict) else item
+                
+                # Check if already exists to avoid duplicates
+                exists = any(f['description'] == description for f in self.world_state['foreshadowing'] if isinstance(f, dict))
                 if not exists:
-                     self.world_state['foreshadowing'].append({
+                     new_item = {
                         "id": str(uuid.uuid4()),
-                        "description": item,
+                        "description": description,
                         "status": "unresolved",
                         "created_at_step": self.world_state["current_step"]
-                    })
+                    }
+                     # If item was a dict, it might have other properties we want to keep? 
+                     # For now, just ensuring description is correct is enough to fix the crash.
+                     self.world_state['foreshadowing'].append(new_item)
             
         if 'resolved_foreshadowing' in updates:
             for resolved in updates['resolved_foreshadowing']:

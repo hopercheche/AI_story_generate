@@ -15,8 +15,13 @@ class StoryNode:
         self.children: List['StoryNode'] = []
         self.visits = 0
         self.value = 0.0
-        # State contains the 'local' view of the world at this node
-        self.state = state or {"summary": "", "characters": {}, "foreshadowing": []}
+        # State contains the 'local' view of the plan at this node
+        # For planning, state includes: outline, world_setting, chapter_list
+        self.state = state or {
+            "outline": "", 
+            "world_setting": {"characters": {}, "locations": {}, "rules": ""}, 
+            "chapter_list": []
+        }
 
     def uct_score(self, exploration_weight: float = 1.41):
         if self.visits == 0:
@@ -33,39 +38,36 @@ class MCTSBase:
         self.branch_factor = branch_factor
         self.root = None
 
-    async def run_search(self, initial_state: Dict, prompt: str, steps: int = 5) -> List[str]:
+    async def run_search(self, initial_state: Dict, prompt: str, language: str = "Chinese") -> Dict:
+        """
+        Runs MCTS to generate a story plan.
+        Returns the best state found (outline, world, chapters).
+        """
         self.root = StoryNode(content=prompt, state=initial_state)
         current_node = self.root
-        sequence = []
         
-        for i in range(steps):
-            logger.info(f"MCTS Step {i+1}/{steps}")
-            for _ in range(self.max_iterations):
-                node = self._select(current_node)
-                if not self._is_terminal(node):
-                    if node.visits == 0:
-                        await self._expand(node)
-                    
-                    if node.children:
-                        child = random.choice(node.children)
-                        score = await self._simulate(child)
-                        self._backpropagate(child, score)
-                    else:
-                        score = await self._simulate(node)
-                        self._backpropagate(node, score)
+        # For planning, we just do one deep search to generate the initial structure
+        # We are not generating a sequence of steps, but refining a single plan
+        
+        logger.info(f"Starting MCTS Planning in {language}...")
+        for _ in range(self.max_iterations):
+            node = self._select(current_node)
+            if node.visits == 0:
+                await self._expand(node, language)
             
-            if current_node.children:
-                best_child = max(current_node.children, key=lambda n: n.visits)
-                current_node = best_child
-                sequence.append(current_node.content)
-                
-                # Commit to memory
-                self.memory.add_event(current_node.content, metadata={"type": "plot_point"})
-                self.memory.update_world_state(current_node.state)
+            if node.children:
+                child = random.choice(node.children)
+                score = await self._simulate(child, language)
+                self._backpropagate(child, score)
             else:
-                break
-                
-        return sequence
+                score = await self._simulate(node, language)
+                self._backpropagate(node, score)
+        
+        if current_node.children:
+            best_child = max(current_node.children, key=lambda n: n.visits)
+            return best_child.state
+        else:
+            return current_node.state
 
     def _select(self, node: StoryNode) -> StoryNode:
         while not node.is_leaf():
@@ -80,40 +82,46 @@ class MCTSBase:
             node.value += score
             node = node.parent
 
-    def _is_terminal(self, node: StoryNode):
-        return False
-        
-    async def _expand(self, node: StoryNode):
+    async def _expand(self, node: StoryNode, language: str):
         raise NotImplementedError
 
-    async def _simulate(self, node: StoryNode) -> float:
+    async def _simulate(self, node: StoryNode, language: str) -> float:
         raise NotImplementedError
 
 class StoryPlanner(MCTSBase):
-    """High-level planner for the entire story arc."""
+    """
+    Planner for generating the initial Story Bible (Outline, World, Chapters).
+    """
     
-    async def _expand(self, node: StoryNode):
-        memory_context = self.memory.get_state_summary()
+    async def _expand(self, node: StoryNode, language: str):
+        premise = node.content
         
         prompt = f"""
         You are a Master Novelist planning a best-selling book.
         
-        Current Story Arc: {node.state.get('summary')}
-        Last Major Event: {node.content}
+        Premise: {premise}
+        Target Language: {language}
         
-        {memory_context}
+        Generate {self.branch_factor} distinct, comprehensive story plans.
+        Each plan must include:
+        1. Story Outline (The main plot arc).
+        2. World Setting (Characters, Locations, Rules).
+        3. Chapter List (A list of chapter titles and brief summaries).
         
-        Generate {self.branch_factor} distinct, high-level plot directions for the NEXT MAJOR PHASE of the story.
-        Focus on broad strokes, major twists, and character arcs.
-        
-        Return JSON:
+        Return JSON format:
         {{
             "options": [
                 {{
-                    "text": "Description of the next major phase...",
-                    "new_characters": {{ "Name": {{ "desc": "...", "status": "alive", "traits": "..." }} }},
-                    "new_foreshadowing": ["Mystery of X"],
-                    "resolved_foreshadowing": []
+                    "outline": "Detailed outline...",
+                    "world_setting": {{
+                        "characters": {{ "Name": {{ "desc": "...", "role": "..." }} }},
+                        "locations": {{ "Name": {{ "desc": "..." }} }},
+                        "rules": "World rules..."
+                    }},
+                    "chapter_list": [
+                        {{ "title": "Chapter 1", "summary": "..." }},
+                        {{ "title": "Chapter 2", "summary": "..." }}
+                    ]
                 }}
             ]
         }}
@@ -125,48 +133,29 @@ class StoryPlanner(MCTSBase):
         try:
             data = json.loads(response)
             for opt in data.get("options", []):
-                text = opt.get("text", "")
-                
-                # Merge state
-                new_summary = (node.state.get("summary") or "") + " -> " + text
-                new_chars = node.state.get("characters", {}).copy()
-                if "new_characters" in opt:
-                    new_chars.update(opt["new_characters"])
-                
-                new_foreshadowing = node.state.get("foreshadowing", []).copy()
-                if "new_foreshadowing" in opt:
-                    # Simple list of dicts for state
-                    for f in opt["new_foreshadowing"]:
-                        new_foreshadowing.append({"description": f, "status": "unresolved"})
-                        
-                if "resolved_foreshadowing" in opt:
-                    for r in opt["resolved_foreshadowing"]:
-                        for f in new_foreshadowing:
-                            if f['description'] == r:
-                                f['status'] = 'resolved'
-
                 new_state = {
-                    "summary": new_summary,
-                    "characters": new_chars,
-                    "foreshadowing": new_foreshadowing
+                    "outline": opt.get("outline", ""),
+                    "world_setting": opt.get("world_setting", {}),
+                    "chapter_list": opt.get("chapter_list", [])
                 }
-                
-                child = StoryNode(content=text, parent=node, state=new_state)
+                # Content of the node is just a label for the path
+                child = StoryNode(content="Plan Option", parent=node, state=new_state)
                 node.children.append(child)
         except Exception as e:
             logger.error(f"Expansion failed: {e}")
 
-    async def _simulate(self, node: StoryNode) -> float:
+    async def _simulate(self, node: StoryNode, language: str) -> float:
         prompt = f"""
-        Critique this story arc for a bestseller.
+        Critique this story plan for a bestseller.
+        Target Language: {language}
         
-        Arc: {node.content}
-        Context: {node.state.get('summary')}
+        Outline: {node.state['outline']}
+        Characters: {json.dumps(node.state['world_setting'].get('characters', {}))}
         
         Score 0.0-1.0 on:
-        1. Originality
-        2. Emotional Stakes
-        3. Pacing
+        1. Marketability
+        2. Character Depth
+        3. Plot Logic
         
         Return JSON: {{ "score": 0.8 }}
         """
@@ -176,73 +165,33 @@ class StoryPlanner(MCTSBase):
         except:
             return 0.5
 
-class ChapterGenerator(MCTSBase):
-    """Detailed generator for specific scenes/chapters."""
-    
-    async def _expand(self, node: StoryNode):
-        memory_context = self.memory.get_state_summary()
-        recent_events = self.memory.query_context(node.content)
-        
+    async def refine_plan(self, current_state: Dict, feedback: str, language: str) -> Dict:
+        """
+        Refines an existing plan based on user feedback.
+        """
         prompt = f"""
-        You are a Scene Director. Plan the next scene in detail.
+        You are a Master Novelist refining a story plan based on editor feedback.
         
-        Current Scene Context: {node.state.get('summary')}
-        Last Action: {node.content}
+        Current Plan:
+        Outline: {current_state['outline']}
+        World: {json.dumps(current_state['world_setting'])}
+        Chapters: {json.dumps(current_state['chapter_list'])}
         
-        {memory_context}
+        Feedback: {feedback}
+        Target Language: {language}
         
-        Relevant Past:
-        {recent_events}
-        
-        Generate {self.branch_factor} options for the NEXT SCENE ACTION/BEAT.
-        Focus on dialogue, sensory details, and immediate conflict.
+        Modify the plan to address the feedback. Keep the rest consistent.
         
         Return JSON:
         {{
-            "options": [
-                {{
-                    "text": "Specific action or dialogue...",
-                    "character_updates": {{ "Name": {{ "location": "...", "status": "..." }} }}
-                }}
-            ]
+            "outline": "Updated outline...",
+            "world_setting": {{ ... }},
+            "chapter_list": [ ... ]
         }}
         """
         response = await llm_service.generate_json(prompt)
         try:
-            data = json.loads(response)
-            for opt in data.get("options", []):
-                text = opt.get("text", "")
-                
-                # Update state lightly for scenes
-                new_summary = (node.state.get("summary") or "") + "\n" + text
-                new_chars = node.state.get("characters", {}).copy()
-                if "character_updates" in opt:
-                    for name, updates in opt["character_updates"].items():
-                        if name in new_chars:
-                            new_chars[name].update(updates)
-                
-                new_state = {
-                    "summary": new_summary,
-                    "characters": new_chars,
-                    "foreshadowing": node.state.get("foreshadowing", [])
-                }
-                
-                child = StoryNode(content=text, parent=node, state=new_state)
-                node.children.append(child)
+            return json.loads(response)
         except Exception as e:
-            logger.error(f"Chapter expansion failed: {e}")
-
-    async def _simulate(self, node: StoryNode) -> float:
-        prompt = f"""
-        Rate this scene beat for engagement and flow.
-        
-        Beat: {node.content}
-        Context: {node.state.get('summary')}
-        
-        Score 0.0-1.0. Return JSON: {{ "score": 0.8 }}
-        """
-        response = await llm_service.generate_json(prompt)
-        try:
-            return float(json.loads(response).get("score", 0.5))
-        except:
-            return 0.5
+            logger.error(f"Refinement failed: {e}")
+            return current_state

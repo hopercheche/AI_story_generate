@@ -10,15 +10,16 @@ class ProjectManager:
     def __init__(self):
         os.makedirs(PROJECTS_DIR, exist_ok=True)
 
-    def create_project(self, name: str, genre: str, description: str) -> Dict:
+    def create_project(self, name: str, genre: str, description: str, language: str = "Chinese") -> Dict:
         project_id = str(uuid.uuid4())
         project_data = {
             "id": project_id,
             "name": name,
             "genre": genre,
             "description": description,
+            "language": language,
             "created_at": str(uuid.uuid1()), # Simple timestamp
-            "status": "active"
+            "status": "planning" # Start in planning mode
         }
         
         self._save_project_meta(project_id, project_data)
@@ -47,10 +48,16 @@ class ProjectManager:
         return None
         
     def delete_project(self, project_id: str):
+        # Delete metadata
         path = os.path.join(PROJECTS_DIR, f"{project_id}.json")
         if os.path.exists(path):
             os.remove(path)
-            # TODO: Cleanup memory directory as well
+            
+        # Delete memory directory
+        import shutil
+        memory_path = os.path.join("./data/memories", project_id)
+        if os.path.exists(memory_path):
+            shutil.rmtree(memory_path)
 
     def _save_project_meta(self, project_id: str, data: Dict):
         with open(os.path.join(PROJECTS_DIR, f"{project_id}.json"), "w") as f:
